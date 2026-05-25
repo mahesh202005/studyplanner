@@ -130,12 +130,14 @@
     const fallbackDate = rawDate || (Number.isInteger(raw.day)
       ? getDateKey(addDays(startOfDay(new Date()), raw.day - ((new Date().getDay() + 6) % 7)))
       : getDateKey(startOfDay(new Date())));
+    const startTime = String(raw.startTime || raw.time || "").trim();
 
     return {
       id: String(raw.id || createUuid()),
       title: String(raw.title || "New study task").trim(),
       date: fallbackDate,
       day: Number.isInteger(raw.day) ? raw.day : Number(raw.day || 0),
+      startTime,
       notes: String(raw.notes || ""),
       status: String(raw.status || "planned"),
       createdAt: raw.createdAt || nowIso()

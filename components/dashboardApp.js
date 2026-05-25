@@ -228,7 +228,7 @@
   function getAssignmentFilters() {
     return {
       search: state.settings.preferences.assignmentSearch,
-      status: state.settings.preferences.assignmentStatusFilter,
+      status: state.settings.preferences.assignmentStatusFilter === "completed" ? "all" : state.settings.preferences.assignmentStatusFilter,
       priority: state.settings.preferences.assignmentPriorityFilter,
       subject: state.settings.preferences.assignmentSubjectFilter,
       sort: state.settings.preferences.assignmentSort
@@ -306,6 +306,7 @@
 
   function buildAssignmentColumns(summary) {
     const filters = getAssignmentFilters();
+    const normalizedStatus = filters.status === "completed" ? "all" : filters.status;
     const normalizedSearch = filters.search.trim().toLowerCase();
     const normalizedSubject = filters.subject.trim().toLowerCase();
     const filtered = sortAssignments(summary.assignments, filters.sort).filter((assignment) => {
@@ -314,35 +315,37 @@
       const matchesSubject = !normalizedSubject || assignment.subject.toLowerCase().includes(normalizedSubject);
       const matchesPriority = filters.priority === "all" || assignment.priority.level === filters.priority;
       const matchesStatus =
-        filters.status === "all" ||
-        (filters.status === "overdue" && isOverdue(assignment.dueDate, assignment.status)) ||
-        assignment.status === filters.status;
+        normalizedStatus === "all" ||
+        (normalizedStatus === "overdue" && isOverdue(assignment.dueDate, assignment.status)) ||
+        assignment.status === normalizedStatus;
 
       return matchesSearch && matchesSubject && matchesPriority && matchesStatus;
     });
 
-    const decorated = filtered.map((assignment) => {
-      const overdue = isOverdue(assignment.dueDate, assignment.status);
-      let statusLabel = ASSIGNMENT_STATUSES[assignment.status].label;
-      let statusBadgeClass = `status-${assignment.status}`;
+    const decorated = filtered
+      .filter((assignment) => assignment.status !== "completed")
+      .map((assignment) => {
+        const overdue = isOverdue(assignment.dueDate, assignment.status);
+        let statusLabel = ASSIGNMENT_STATUSES[assignment.status].label;
+        let statusBadgeClass = `status-${assignment.status}`;
 
-      if (overdue) {
-        statusLabel = "Overdue";
-        statusBadgeClass = "status-overdue";
-      }
+        if (overdue) {
+          statusLabel = "Overdue";
+          statusBadgeClass = "status-overdue";
+        }
 
-      return {
-        ...assignment,
-        dueLabel: formatRelativeDue(assignment.dueDate, assignment.status),
-        statusLabel,
-        statusBadgeClass,
-        attachmentLabel: `${assignment.attachments.length} attachment${assignment.attachments.length === 1 ? "" : "s"}`,
-        noteLabel: assignment.notes ? "Notes saved" : "No notes",
-        createdLabel: `Created ${formatDate(assignment.createdAt)}`,
-        toggleLabel: assignment.status === "completed" ? "Mark active" : "Complete",
-        advanceLabel: assignment.status === "todo" ? "Start work" : "Move forward"
-      };
-    });
+        return {
+          ...assignment,
+          dueLabel: formatRelativeDue(assignment.dueDate, assignment.status),
+          statusLabel,
+          statusBadgeClass,
+          attachmentLabel: `${assignment.attachments.length} attachment${assignment.attachments.length === 1 ? "" : "s"}`,
+          noteLabel: assignment.notes ? "Notes saved" : "No notes",
+          createdLabel: `Created ${formatDate(assignment.createdAt)}`,
+          toggleLabel: assignment.status === "completed" ? "Mark active" : "Complete",
+          advanceLabel: assignment.status === "todo" ? "Start work" : "Move forward"
+        };
+      });
 
     const columns = [
       {
@@ -360,14 +363,6 @@
         items: decorated.filter((assignment) => assignment.status === "in_progress"),
         emptyTitle: "No active builds",
         emptyMessage: "Move a task here when you start working."
-      },
-      {
-        key: "completed",
-        title: "Completed",
-        caption: "Delivered",
-        items: decorated.filter((assignment) => assignment.status === "completed"),
-        emptyTitle: "Nothing finished yet",
-        emptyMessage: "Completed assignments will collect here."
       }
     ];
 
@@ -463,25 +458,27 @@
       ...day,
       tasks: monthlyTasks.filter((task) => task.date === day.key)
     }));
-    const exams = summary.exams.map((exam) => {
-      const diff = daysUntil(exam.date);
-      let urgencyClass = "urgency-steady";
-      let urgencyLabel = "Upcoming";
-      if (diff !== null && diff <= 0) {
-        urgencyClass = "urgency-now";
-        urgencyLabel = "Today";
-      } else if (diff !== null && diff <= 3) {
-        urgencyClass = "urgency-soon";
-        urgencyLabel = "Soon";
-      }
+    const exams = summary.exams
+      .filter((exam) => daysUntil(exam.date) !== null && daysUntil(exam.date) >= 0)
+      .map((exam) => {
+        const diff = daysUntil(exam.date);
+        let urgencyClass = "urgency-steady";
+        let urgencyLabel = "Upcoming";
+        if (diff !== null && diff <= 0) {
+          urgencyClass = "urgency-now";
+          urgencyLabel = "Today";
+        } else if (diff !== null && diff <= 3) {
+          urgencyClass = "urgency-soon";
+          urgencyLabel = "Soon";
+        }
 
-      return {
-        ...exam,
-        urgencyClass,
-        urgencyLabel,
-        reminderLabel: `Alerts: ${(exam.reminderDays || []).join(", ")} day windows`
-      };
-    });
+        return {
+          ...exam,
+          urgencyClass,
+          urgencyLabel,
+          reminderLabel: `Alerts: ${(exam.reminderDays || []).join(", ")} day windows`
+        };
+      });
     const nextPending = summary.pendingAssignments
       .slice()
       .sort((left, right) => (left.dueDate || "9999-12-31").localeCompare(right.dueDate || "9999-12-31"))[0];
@@ -1018,14 +1015,14 @@
 
   function upsertExam(form, mode, id) {
     const data = Object.fromEntries(new FormData(form).entries());
-    if (!String(data.name || "").trim() || !String(data.date || "").trim()) {
-      showToast("Exam name and date are required.");
+    if (!String(data.name || "").trim() || !String(data.date || "").trim() || !String(data.time || "").trim()) {
+      showToast("Exam name, date, and start time are required.");
       return;
     }
 
     state = storage.mutateState(state, (draft) => {
       const existing = id ? findById(draft.planner.exams, id) : null;
-      const dateValue = data.date ? new Date(`${data.date}T09:00:00`).toISOString() : "";
+      const dateValue = data.date ? new Date(`${data.date}T${data.time}:00`).toISOString() : "";
       const exam = storage.normalizeExam({
         ...(existing || {}),
         id: existing ? existing.id : undefined,
@@ -1094,6 +1091,7 @@
         id: existing ? existing.id : undefined,
         title: data.title,
         date: String(data.date).slice(0, 10),
+        startTime: String(data.startTime || ""),
         notes: data.notes,
         createdAt: existing ? existing.createdAt : nowIso()
       });

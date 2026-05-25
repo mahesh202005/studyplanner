@@ -6,7 +6,8 @@
     formatDate,
     formatDateTime,
     formatLongDate,
-    formatRelativeDue
+    formatRelativeDue,
+    formatTime
   } = App.dateUtils;
   const {
     ASSIGNMENT_STATUSES,
@@ -23,6 +24,33 @@
     }
 
     return String(value).slice(0, 10);
+  }
+
+  function toTimeInputValue(value) {
+    if (!value) {
+      return "";
+    }
+
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) {
+      return "";
+    }
+
+    return parsed.toLocaleTimeString("en-GB", {
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false
+    }).slice(0, 5);
+  }
+
+  function getDefaultTimeInputValue(value) {
+    const existingValue = toTimeInputValue(value);
+    if (existingValue) {
+      return existingValue;
+    }
+
+    const now = new Date();
+    return `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
   }
 
   function renderEmptyState(title, message, actionLabel, actionName) {
@@ -257,7 +285,6 @@
                   <option value="all" ${model.filters.status === "all" ? "selected" : ""}>All statuses</option>
                   <option value="todo" ${model.filters.status === "todo" ? "selected" : ""}>To do</option>
                   <option value="in_progress" ${model.filters.status === "in_progress" ? "selected" : ""}>In progress</option>
-                  <option value="completed" ${model.filters.status === "completed" ? "selected" : ""}>Completed</option>
                   <option value="overdue" ${model.filters.status === "overdue" ? "selected" : ""}>Overdue</option>
                 </select>
               </div>
@@ -348,7 +375,7 @@
                       <span class="status-badge urgency-chip ${escapeHtml(exam.urgencyClass)}">${escapeHtml(exam.urgencyLabel)}</span>
                     </div>
                     <strong class="countdown-value" data-countdown-date="${escapeHtml(exam.date)}">${escapeHtml(formatCountdown(exam.date))}</strong>
-                    <p class="subtle">${escapeHtml(formatLongDate(exam.date))}${exam.location ? ` · ${escapeHtml(exam.location)}` : ""}</p>
+                    <p class="subtle">Starts at ${escapeHtml(toTimeInputValue(exam.date))} · ${escapeHtml(formatLongDate(exam.date))}${exam.location ? ` · ${escapeHtml(exam.location)}` : ""}</p>
                     ${exam.notes ? `<p class="subtle">${escapeHtml(exam.notes)}</p>` : ""}
                     <div class="meta-row">
                       <span>${escapeHtml(exam.reminderLabel)}</span>
@@ -359,7 +386,7 @@
                         <button type="button" class="mini-button" data-action="open-exam-modal" data-id="${exam.id}">Edit</button>
                       </div>
                       <div class="action-group">
-                        <button type="button" class="button-danger mini-button" data-action="delete-exam" data-id="${exam.id}">Delete</button>
+                        <button type="button" class="button-danger mini-button" data-action="delete-exam" data-id="${exam.id}">Remove exam</button>
                       </div>
                     </div>
                   </article>
@@ -420,6 +447,7 @@
                               <article class="week-task" draggable="true" data-drag-weekly-id="${task.id}">
                                 <strong>${escapeHtml(task.title)}</strong>
                                 <p class="subtle">${escapeHtml(day.dayLabel)} • ${escapeHtml(day.monthLabel)} ${escapeHtml(String(day.dayNumber))}</p>
+                                <p class="subtle">${task.startTime ? `Starts at ${escapeHtml(task.startTime)}` : "All day"}</p>
                                 ${task.notes ? `<p class="subtle">${escapeHtml(task.notes)}</p>` : ""}
                                 <div class="card-actions">
                                   <div class="action-group">
@@ -849,8 +877,12 @@
             <input id="examSubjectField" name="subject" type="text" value="${escapeHtml(exam.subject || "")}" />
           </div>
           <div class="field-group">
-            <label for="examDateField">Date and time</label>
+            <label for="examDateField">Date</label>
             <input id="examDateField" name="date" type="date" value="${escapeHtml(toDateInputValue(exam.date))}" required />
+          </div>
+          <div class="field-group">
+            <label for="examTimeField">Start time</label>
+            <input id="examTimeField" name="time" type="time" value="${escapeHtml(getDefaultTimeInputValue(exam.date))}" required />
           </div>
           <div class="field-group">
             <label for="examLocationField">Location</label>
@@ -867,7 +899,7 @@
         </div>
         <div class="modal-footer">
           <div class="panel-actions">
-            ${mode === "edit" ? `<button type="button" class="button-danger" data-action="delete-exam" data-id="${escapeHtml(exam.id)}">Delete</button>` : ""}
+            ${mode === "edit" ? `<button type="button" class="button-danger" data-action="delete-exam" data-id="${escapeHtml(exam.id)}">Delete exam</button>` : ""}
           </div>
           <div class="panel-actions">
             <button type="button" class="button-ghost" data-action="close-modal">Cancel</button>
@@ -924,6 +956,10 @@
           <div class="field-group">
             <label for="weeklyDateField">Date</label>
             <input id="weeklyDateField" name="date" type="date" value="${toDateInputValue(task.date || "")}" required />
+          </div>
+          <div class="field-group">
+            <label for="weeklyTimeField">Start time</label>
+            <input id="weeklyTimeField" name="startTime" type="time" value="${escapeHtml(getDefaultTimeInputValue(task.startTime))}" />
           </div>
           <div class="field-group">
             <label for="weeklyNotesField">Notes</label>
