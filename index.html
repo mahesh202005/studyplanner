@@ -5,34 +5,86 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta
     name="description"
-    content="Student Productivity Dashboard is a premium study planning workspace for assignments, exams, habits, analytics, and focused sessions."
+    content="Campus OS is a Notion-inspired student planner for assignments, study sessions, habits, and daily focus."
   />
   <meta name="theme-color" content="#0b1324" />
-  <title>Student Productivity Dashboard</title>
+  <title>Campus OS — Student Planner</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link
     href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;700&display=swap"
     rel="stylesheet"
   />
-  <link rel="stylesheet" href="style.css?v=2026-05-26-month-plan" />
+  <link rel="stylesheet" href="style.css?v=2026-09-05-campus" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js" defer></script>
-  <script src="utils/constants.js?v=2026-05-26-month-plan" defer></script>
-  <script src="utils/helpers.js?v=2026-05-26-month-plan" defer></script>
-  <script src="utils/date.js?v=2026-05-26-month-plan" defer></script>
-  <script src="storage/plannerStorage.js?v=2026-05-26-month-plan" defer></script>
-  <script src="components/templates.js?v=2026-05-26-month-plan" defer></script>
-  <script src="components/dashboardApp.js?v=2026-05-26-month-plan" defer></script>
-  <script src="script.js?v=2026-05-26-month-plan" defer></script>
+  <script src="utils/constants.js?v=2026-09-05-campus" defer></script>
+  <script src="utils/helpers.js?v=2026-06-03-v2" defer></script>
+  <script src="utils/date.js?v=2026-06-03-v2" defer></script>
+  <script src="auth/auth.js?v=2026-06-03-v2" defer></script>
+  <script src="storage/plannerStorage.js?v=2026-06-03-v2" defer></script>
+  <script src="components/templates.js?v=2026-06-03-v2" defer></script>
+  <script src="components/dashboardApp.js?v=2026-06-03-v2" defer></script>
+  <script src="script.js?v=2026-06-03-v2" defer></script>
 </head>
-<body class="theme-midnight is-booting">
+<body class="theme-daylight is-booting">
   <div class="app-backdrop">
     <div class="backdrop-orb orb-a" aria-hidden="true"></div>
     <div class="backdrop-orb orb-b" aria-hidden="true"></div>
     <div class="backdrop-grid" aria-hidden="true"></div>
   </div>
 
-  <div class="app-shell">
+  <section class="auth-shell" id="authShell" aria-labelledby="authTitle" hidden>
+    <div class="auth-panel glass-panel">
+      <div class="auth-copy">
+        <span class="eyebrow">Campus OS</span>
+        <h1 id="authTitle" class="hero-title">Your study life, in one place.</h1>
+        <p class="subtle">
+          A simple, private workspace for tasks, deadlines, habits, and focused study. Your planner stays saved in this browser.
+        </p>
+        <div class="auth-feature-list">
+          <div class="auth-feature-pill">Assignments</div>
+          <div class="auth-feature-pill">Exam reminders</div>
+          <div class="auth-feature-pill">Habit streaks</div>
+          <div class="auth-feature-pill">Pomodoro focus</div>
+        </div>
+      </div>
+
+      <div class="auth-card">
+        <div class="auth-tab-row" role="tablist" aria-label="Authentication mode">
+          <button type="button" class="auth-tab is-active" id="signInTab" data-auth-mode="signin" role="tab" aria-selected="true">
+            Sign in
+          </button>
+          <button type="button" class="auth-tab" id="signUpTab" data-auth-mode="signup" role="tab" aria-selected="false">
+            Create account
+          </button>
+        </div>
+
+        <form id="authForm" class="auth-form" aria-label="Email and password login form">
+          <div class="field-group" id="authNameGroup" hidden>
+            <label for="authName">Name</label>
+            <input type="text" id="authName" name="authName" placeholder="Your name" autocomplete="name" />
+          </div>
+
+          <div class="field-group">
+            <label for="authEmail">Email</label>
+            <input type="email" id="authEmail" name="authEmail" placeholder="you@example.com" autocomplete="email" required />
+          </div>
+
+          <div class="field-group">
+            <label for="authPassword">Password</label>
+            <input type="password" id="authPassword" name="authPassword" placeholder="Minimum 6 characters" autocomplete="current-password" required />
+          </div>
+
+          <p class="form-help" id="authHelpText">Sign in with your saved account to open the dashboard.</p>
+          <p class="auth-error" id="authError" role="alert" hidden></p>
+
+          <button type="submit" class="primary-action" id="authSubmitBtn">Sign in</button>
+        </form>
+      </div>
+    </div>
+  </section>
+
+  <div class="app-shell" id="appShell" hidden>
     <aside class="sidebar glass-panel" id="sidebarPanel" aria-label="Primary navigation">
       <div id="sidebarContent" class="sidebar-content">
         <div class="skeleton-block skeleton-title"></div>
@@ -62,12 +114,18 @@
         </div>
 
         <div class="topbar-actions">
+          <span class="chip-button account-chip" id="accountChip" aria-live="polite">Guest</span>
           <button type="button" class="chip-button" id="jumpPlannerBtn">Add work</button>
           <button type="button" class="chip-button" id="focusModeBtn">Focus mode</button>
           <button type="button" class="chip-button" id="notificationBtn">Notifications</button>
+          <button type="button" class="appearance-toggle" id="appearanceToggleBtn" aria-label="Toggle dark/light mode">
+            <span class="appearance-toggle-icon">🌙</span>
+            <span class="appearance-toggle-label" id="appearanceToggleLabel">Dark</span>
+          </button>
           <button type="button" class="chip-button" id="themeCycleBtn">Theme</button>
           <button type="button" class="chip-button" id="exportBtn">Export</button>
           <button type="button" class="chip-button" id="importBtn">Import</button>
+          <button type="button" class="chip-button danger-chip" id="logoutBtn">Log out</button>
         </div>
       </header>
 
@@ -92,6 +150,16 @@
               <div class="skeleton-card tall"></div>
               <div class="skeleton-card tall"></div>
               <div class="skeleton-card tall"></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="workspace-panel glass-panel" id="section-schedule" aria-labelledby="scheduleTitle">
+          <div class="section-skeleton">
+            <div class="skeleton-line"></div>
+            <div class="skeleton-grid skeleton-cards">
+              <div class="skeleton-card"></div>
+              <div class="skeleton-card"></div>
             </div>
           </div>
         </section>

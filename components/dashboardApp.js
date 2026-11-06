@@ -5,6 +5,7 @@
     APP_NAME,
     APP_VERSION,
     ASSIGNMENT_STATUSES,
+    ATTENDANCE_WARNING_PERCENT,
     DAYS,
     POMODORO_PRESETS,
     PRIORITY_OPTIONS,
@@ -42,7 +43,8 @@
 
   const dom = {};
   const runtime = {
-    chart: null,
+    charts: {},
+    initialized: false,
     liveInterval: null,
     reminderInterval: null,
     modal: null,
@@ -58,16 +60,22 @@
     dom.jumpPlannerBtn = document.getElementById("jumpPlannerBtn");
     dom.focusModeBtn = document.getElementById("focusModeBtn");
     dom.notificationBtn = document.getElementById("notificationBtn");
+    dom.appearanceToggleBtn = document.getElementById("appearanceToggleBtn");
+    dom.appearanceToggleLabel = document.getElementById("appearanceToggleLabel");
     dom.themeCycleBtn = document.getElementById("themeCycleBtn");
     dom.exportBtn = document.getElementById("exportBtn");
     dom.importBtn = document.getElementById("importBtn");
+    dom.accountChip = document.getElementById("accountChip");
+    dom.logoutBtn = document.getElementById("logoutBtn");
     dom.importInput = document.getElementById("importInput");
     dom.overviewPanel = document.getElementById("section-overview");
     dom.plannerPanel = document.getElementById("section-planner");
+    dom.schedulePanel = document.getElementById("section-schedule");
     dom.habitsPanel = document.getElementById("section-habits");
     dom.analyticsPanel = document.getElementById("section-analytics");
     dom.focusPanel = document.getElementById("section-focus");
     dom.settingsPanel = document.getElementById("section-settings");
+    dom.dashboardRoot = document.getElementById("dashboardRoot");
     dom.modalRoot = document.getElementById("modalRoot");
     dom.toastRoot = document.getElementById("toastRoot");
   }
@@ -110,8 +118,14 @@
   }
 
   function syncBodyClasses() {
-    document.body.classList.remove("theme-midnight", "theme-daylight", "theme-ember", "theme-ocean");
+    document.body.classList.remove("theme-midnight", "theme-daylight", "theme-ember", "theme-ocean", "theme-lavender");
     document.body.classList.add(`theme-${state.settings.theme}`);
+    if (dom.dashboardRoot) {
+      const activeSection = state.settings.preferences.activeSection === "attendance"
+        ? "schedule"
+        : (state.settings.preferences.activeSection || "overview");
+      dom.dashboardRoot.dataset.activeSection = activeSection;
+    }
     document.body.classList.toggle("sidebar-collapsed", state.settings.preferences.sidebarCollapsed);
     document.body.classList.toggle("focus-mode", state.settings.preferences.focusMode);
     document.body.classList.remove("is-booting");
@@ -121,6 +135,13 @@
     dom.focusModeBtn.textContent = state.settings.preferences.focusMode ? "Exit focus mode" : "Focus mode";
     dom.notificationBtn.textContent = state.settings.notifications.enabled ? "Notifications on" : "Notifications";
     dom.themeCycleBtn.textContent = `Theme: ${THEMES.find((theme) => theme.id === state.settings.theme).label}`;
+    if (dom.appearanceToggleLabel) {
+      dom.appearanceToggleLabel.textContent = state.settings.theme === "daylight" ? "Light" : "Dark";
+    }
+    if (dom.accountChip && App.auth && typeof App.auth.getCurrentUser === "function") {
+      const currentUser = App.auth.getCurrentUser();
+      dom.accountChip.textContent = currentUser ? currentUser.email : "Guest";
+    }
   }
 
   function computeOnTimeRate(assignments) {
@@ -179,11 +200,134 @@
     return clamp(assignmentScore + habitScore + focusScore, 0, 100);
   }
 
+  function computeAttendancePercentage(attendedClasses, totalClasses) {
+    if (!totalClasses) {
+      return 0;
+    }
+
+    return clamp(Math.round((attendedClasses / totalClasses) * 100), 0, 100);
+  }
+
+  function getAttendanceRecoveryText(subject) {
+    if (!subject.totalClasses) {
+      return "Start tracking classes to unlock attendance guidance.";
+    }
+
+    if (subject.targetPercentage >= 100) {
+      return subject.percentage >= 100
+        ? "Perfect attendance maintained."
+        : "Attend every remaining class to move toward 100%.";
+    }
+
+    if (subject.percentage >= subject.targetPercentage) {
+      const safeAbsences = Math.max(0, Math.floor(subject.attendedClasses / (subject.targetPercentage / 100)) - subject.totalClasses);
+      return safeAbsences > 0
+        ? `You can miss about ${safeAbsences} more class${safeAbsences === 1 ? "" : "es"} before crossing the alert line.`
+        : "You are exactly on track, so the next classes matter.";
+    }
+
+    const neededClasses = Math.max(
+      1,
+      Math.ceil((((subject.targetPercentage / 100) * subject.totalClasses) - subject.attendedClasses) / (1 - subject.targetPercentage / 100))
+    );
+    return `Attend roughly ${neededClasses} more class${neededClasses === 1 ? "" : "es"} in a row to recover.`;
+  }
+
+  function buildUpcomingItems(assignments, exams, weeklyTasks) {
+    const assignmentItems = assignments
+      .filter((assignment) => assignment.status !== "completed" && assignment.dueDate)
+      .map((assignment) => ({
+        id: assignment.id,
+        type: "assignment",
+        title: assignment.title,
+        subject: assignment.subject,
+        dateKey: String(assignment.dueDate).slice(0, 10),
+        dueLabel: formatRelativeDue(assignment.dueDate, assignment.status)
+      }));
+
+    const examItems = exams.map((exam) => ({
+      id: exam.id,
+      type: "exam",
+      title: exam.name,
+      subject: exam.subject,
+      dateKey: String(exam.date).slice(0, 10),
+      dueLabel: daysUntil(exam.date) === 0 ? "Today" : `${Math.max(daysUntil(exam.date), 0)} day${Math.max(daysUntil(exam.date), 0) === 1 ? "" : "s"} left`
+    }));
+
+    const calendarItems = weeklyTasks.map((task) => ({
+      id: task.id,
+      type: task.type === "event" ? "event" : "task",
+      title: task.title,
+      subject: task.type === "event" ? "Calendar event" : "Study task",
+      dateKey: String(task.date).slice(0, 10),
+      dueLabel: task.startTime ? `Starts at ${task.startTime}` : "Scheduled"
+    }));
+
+    return [...assignmentItems, ...examItems, ...calendarItems]
+      .filter((item) => item.dateKey)
+      .sort((left, right) => left.dateKey.localeCompare(right.dateKey))
+      .slice(0, 6)
+      .map((item) => ({
+        ...item,
+        formattedDate: formatDate(item.dateKey)
+      }));
+  }
+
+  function buildAchievementBadges(summary) {
+    const badges = [];
+
+    if (summary.completedAssignments >= 1) {
+      badges.push({ title: "First Win", hint: "Complete your first tracked assignment." });
+    }
+
+    if (summary.studyStreak >= 5) {
+      badges.push({ title: "Momentum", hint: `${summary.studyStreak} active study days in a row.` });
+    }
+
+    if (summary.focusMinutesTotal >= 300) {
+      badges.push({ title: "Deep Focus", hint: "Log five hours of focused work." });
+    }
+
+    if (summary.bestHabitStreak >= 7) {
+      badges.push({ title: "Consistency", hint: "Keep any habit alive for a week." });
+    }
+
+    if (summary.attendanceAverage >= ATTENDANCE_WARNING_PERCENT && summary.attendanceSubjects.length) {
+      badges.push({ title: "Attendance Guard", hint: "Stay above the warning line overall." });
+    }
+
+    return badges.slice(0, 4);
+  }
+
+  function computeGamification(summary) {
+    const xp =
+      (summary.completedAssignments * 45) +
+      (summary.habitsCompletedToday * 8) +
+      summary.focusMinutesTotal +
+      (summary.studyStreak * 12) +
+      (summary.attendanceAverage >= ATTENDANCE_WARNING_PERCENT ? 40 : 0);
+    const level = Math.max(1, Math.floor(xp / 250) + 1);
+    const nextLevelXp = level * 250;
+    const previousLevelXp = (level - 1) * 250;
+    const progress = nextLevelXp === previousLevelXp
+      ? 100
+      : clamp(Math.round(((xp - previousLevelXp) / (nextLevelXp - previousLevelXp)) * 100), 0, 100);
+
+    return {
+      xp,
+      level,
+      progress,
+      nextLevelXp,
+      nextLevelLabel: `${Math.max(nextLevelXp - xp, 0)} XP to level ${level + 1}`
+    };
+  }
+
   function buildSummary() {
     const assignments = collectionValues(state.planner.assignments);
     const exams = collectionValues(state.planner.exams).sort((left, right) => new Date(left.date) - new Date(right.date));
     const habits = collectionValues(state.planner.habits);
     const weeklyTasks = collectionValues(state.planner.weeklyTasks);
+    const attendanceSubjects = collectionValues(state.planner.attendance || { byId: {}, allIds: [] });
     const todayKey = getTodayKey();
     const pendingAssignments = assignments.filter((assignment) => assignment.status !== "completed");
     const overdueAssignments = pendingAssignments.filter((assignment) => isOverdue(assignment.dueDate, assignment.status));
@@ -192,6 +336,9 @@
     const habitsCompletedToday = habits.filter((habit) => habit.history[todayKey]).length;
     const habitStreaks = Object.values(state.analytics.streaks.habits || {});
     const bestHabitStreak = habitStreaks.length ? Math.max(...habitStreaks.map((streak) => streak.longest)) : 0;
+    const studyStreak = getStreakStatsFromKeys(
+      Object.keys(state.analytics.heatmap || {}).filter((key) => Number(state.analytics.heatmap[key]) > 0)
+    ).current;
     const focusHeadline = pendingAssignments
       .slice()
       .sort((left, right) => {
@@ -199,12 +346,30 @@
         const rightDate = right.dueDate || "9999-12-31";
         return leftDate.localeCompare(rightDate);
       })[0];
+    const attendanceDecorated = attendanceSubjects.map((subject) => {
+      const percentage = computeAttendancePercentage(subject.attendedClasses, subject.totalClasses);
+      const warning = subject.totalClasses > 0 && percentage < subject.targetPercentage;
+
+      return {
+        ...subject,
+        percentage,
+        warning,
+        recoveryText: getAttendanceRecoveryText({
+          ...subject,
+          percentage
+        })
+      };
+    });
+    const attendanceAverage = attendanceDecorated.length
+      ? Math.round(attendanceDecorated.reduce((sum, subject) => sum + subject.percentage, 0) / attendanceDecorated.length)
+      : 0;
 
     const summary = {
       assignments,
       exams,
       habits,
       weeklyTasks,
+      attendanceSubjects: attendanceDecorated,
       pendingAssignments,
       overdueAssignments,
       nextExam,
@@ -213,23 +378,33 @@
       totalAssignments: assignments.length,
       completedAssignments: assignments.filter((assignment) => assignment.status === "completed").length,
       focusMinutesToday: focusTotals.todayMinutes,
+      focusMinutesTotal: focusTotals.totalFocusMinutes,
       onTimeRate: computeOnTimeRate(assignments),
       assignmentStreak: state.analytics.streaks.assignments.current || 0,
       focusStreak: state.analytics.streaks.focus.current || 0,
+      studyStreak,
+      attendanceAverage,
+      atRiskAttendanceCount: attendanceDecorated.filter((subject) => subject.warning).length,
+      upcomingItems: buildUpcomingItems(assignments, exams, weeklyTasks),
       bestHabitStreak,
       topAssignment: focusHeadline || null,
-      productivityScore: 0
+      productivityScore: 0,
+      gamification: null,
+      achievementBadges: []
     };
 
     summary.productivityScore = computeProductivityScore(summary);
+    summary.gamification = computeGamification(summary);
+    summary.achievementBadges = buildAchievementBadges(summary);
     return summary;
   }
 
   function getAssignmentFilters() {
     return {
       search: state.settings.preferences.assignmentSearch,
-      status: state.settings.preferences.assignmentStatusFilter === "completed" ? "all" : state.settings.preferences.assignmentStatusFilter,
+      status: state.settings.preferences.assignmentStatusFilter,
       priority: state.settings.preferences.assignmentPriorityFilter,
+      category: state.settings.preferences.assignmentCategoryFilter,
       subject: state.settings.preferences.assignmentSubjectFilter,
       sort: state.settings.preferences.assignmentSort
     };
@@ -306,25 +481,24 @@
 
   function buildAssignmentColumns(summary) {
     const filters = getAssignmentFilters();
-    const normalizedStatus = filters.status === "completed" ? "all" : filters.status;
     const normalizedSearch = filters.search.trim().toLowerCase();
+    const normalizedCategory = filters.category.trim().toLowerCase();
     const normalizedSubject = filters.subject.trim().toLowerCase();
     const filtered = sortAssignments(summary.assignments, filters.sort).filter((assignment) => {
-      const searchTarget = `${assignment.title} ${assignment.subject} ${assignment.tags.join(" ")}`.toLowerCase();
+      const searchTarget = `${assignment.title} ${assignment.subject} ${assignment.category} ${assignment.tags.join(" ")}`.toLowerCase();
       const matchesSearch = !normalizedSearch || searchTarget.includes(normalizedSearch);
+      const matchesCategory = !normalizedCategory || assignment.category.toLowerCase().includes(normalizedCategory);
       const matchesSubject = !normalizedSubject || assignment.subject.toLowerCase().includes(normalizedSubject);
       const matchesPriority = filters.priority === "all" || assignment.priority.level === filters.priority;
       const matchesStatus =
-        normalizedStatus === "all" ||
-        (normalizedStatus === "overdue" && isOverdue(assignment.dueDate, assignment.status)) ||
-        assignment.status === normalizedStatus;
+        filters.status === "all" ||
+        (filters.status === "overdue" && isOverdue(assignment.dueDate, assignment.status)) ||
+        assignment.status === filters.status;
 
-      return matchesSearch && matchesSubject && matchesPriority && matchesStatus;
+      return matchesSearch && matchesCategory && matchesSubject && matchesPriority && matchesStatus;
     });
 
-    const decorated = filtered
-      .filter((assignment) => assignment.status !== "completed")
-      .map((assignment) => {
+    const decorated = filtered.map((assignment) => {
         const overdue = isOverdue(assignment.dueDate, assignment.status);
         let statusLabel = ASSIGNMENT_STATUSES[assignment.status].label;
         let statusBadgeClass = `status-${assignment.status}`;
@@ -343,7 +517,10 @@
           noteLabel: assignment.notes ? "Notes saved" : "No notes",
           createdLabel: `Created ${formatDate(assignment.createdAt)}`,
           toggleLabel: assignment.status === "completed" ? "Mark active" : "Complete",
-          advanceLabel: assignment.status === "todo" ? "Start work" : "Move forward"
+          advanceLabel: assignment.status === "todo" ? "Start work" : "Move forward",
+          progressLabel: `${assignment.progress}% done`,
+          categoryLabel: assignment.category || "General",
+          overdue
         };
       });
 
@@ -363,6 +540,14 @@
         items: decorated.filter((assignment) => assignment.status === "in_progress"),
         emptyTitle: "No active builds",
         emptyMessage: "Move a task here when you start working."
+      },
+      {
+        key: "completed",
+        title: "Completed",
+        caption: "Done",
+        items: decorated.filter((assignment) => assignment.status === "completed"),
+        emptyTitle: "Nothing completed yet",
+        emptyMessage: "Finish a task to see the completion history here."
       }
     ];
 
@@ -373,12 +558,13 @@
     const nextExamLine = summary.nextExam ? `${summary.nextExam.name} in ${Math.max(daysUntil(summary.nextExam.date), 0)} days` : "No exam countdown active";
 
     return {
-      activeSection: state.settings.preferences.activeSection,
+      activeSection: state.settings.preferences.activeSection === "attendance" ? "schedule" : state.settings.preferences.activeSection,
       appName: APP_NAME,
-      tagline: "Production-grade study operating system",
+      tagline: "Your calm study workspace",
       sectionMeta: {
         overview: `${summary.productivityScore}%`,
         planner: `${summary.pendingAssignments.length}`,
+        attendance: `${summary.attendanceAverage}%`,
         habits: `${summary.habitsCompletedToday}/${summary.habitsTotal || 0}`,
         analytics: `${summary.onTimeRate}%`,
         focus: `${summary.focusMinutesToday}m`,
@@ -388,7 +574,7 @@
       focusMinutes: summary.focusMinutesToday,
       todayLine: nextExamLine,
       sidebarHintA: summary.topAssignment ? `Next task: ${summary.topAssignment.title}` : "No urgent assignment blocking you.",
-      sidebarHintB: `Focus streak: ${summary.focusStreak} day${summary.focusStreak === 1 ? "" : "s"}`
+      sidebarHintB: `Study streak: ${summary.studyStreak} day${summary.studyStreak === 1 ? "" : "s"}`
     };
   }
 
@@ -409,7 +595,7 @@
     const profile = state.settings.profile || { name: "", semester: "" };
 
     return {
-      copy: "A premium student workflow with normalized local data, richer analytics, and calmer study decisions.",
+      copy: "A clean, personal space for the work that matters to you.",
       welcomeLabel: profile.name ? `Welcome, ${profile.name}` : "Welcome back",
       semesterLabel: profile.semester ? `Semester: ${profile.semester}` : "Semester not set",
       focusHeadline: summary.topAssignment ? `Start with ${summary.topAssignment.title}` : "Use this dashboard to lock in one important study win today.",
@@ -422,8 +608,33 @@
       themeLabel: `Theme: ${themeLabel}`,
       notificationLabel: state.settings.notifications.enabled ? "Alerts enabled" : "Alerts off",
       urgentAssignments,
+      upcomingItems: summary.upcomingItems,
       quote: getQuote(),
       summaryLine: `On-time delivery is ${summary.onTimeRate}% and today has ${summary.focusMinutesToday} focus minutes logged.`,
+      gamification: summary.gamification,
+      badges: summary.achievementBadges,
+      spotlightCards: [
+        {
+          label: "Study streak",
+          value: `${summary.studyStreak} days`,
+          hint: summary.studyStreak ? "Keep the chain alive today." : "One focused action starts the streak."
+        },
+        {
+          label: "My schedule",
+          value: "5 days",
+          hint: "8 subjects are arranged in your timetable"
+        },
+        {
+          label: "XP points",
+          value: `${summary.gamification.xp}`,
+          hint: summary.gamification.nextLevelLabel
+        },
+        {
+          label: "Focus logged",
+          value: `${summary.focusMinutesTotal}m`,
+          hint: `${state.analytics.focusSessions.totals.completedSessions} completed sessions`
+        }
+      ],
       metrics: [
         {
           label: "Pending assignments",
@@ -454,10 +665,19 @@
     const monthlyTasks = collectionValues(state.planner.weeklyTasks);
     const selectedMonthKey = getPlannerMonthKey();
     const calendarDays = getPlannerCalendarDays(selectedMonthKey);
-    const groupedTasks = calendarDays.map((day) => ({
-      ...day,
-      tasks: monthlyTasks.filter((task) => task.date === day.key)
-    }));
+    const groupedTasks = calendarDays.map((day) => {
+      const tasks = monthlyTasks.filter((task) => task.date === day.key);
+      const assignmentsDue = summary.pendingAssignments.filter((assignment) => String(assignment.dueDate).slice(0, 10) === day.key);
+      const examsDue = summary.exams.filter((exam) => String(exam.date).slice(0, 10) === day.key);
+
+      return {
+        ...day,
+        tasks,
+        assignmentsDue,
+        examsDue,
+        totalItems: tasks.length + assignmentsDue.length + examsDue.length
+      };
+    });
     const exams = summary.exams
       .filter((exam) => daysUntil(exam.date) !== null && daysUntil(exam.date) >= 0)
       .map((exam) => {
@@ -490,6 +710,7 @@
         search: filters.search,
         status: filters.status,
         priority: filters.priority,
+        category: filters.category,
         subject: filters.subject,
         sort: filters.sort
       },
@@ -513,14 +734,14 @@
         month: "long",
         year: "numeric"
       }),
-      monthlyHint: "Drag tasks across the calendar to move them to a different day, or edit them to update the date.",
+      monthlyHint: "Assignments, exams, and your own study items now share one monthly view. Drag your own items to reschedule them.",
       assignmentInsight: {
         title: nextPending ? `${nextPending.title} is the next delivery point.` : "Your assignment board is under control.",
         body: nextPending
           ? `${nextPending.subject} is currently ${formatRelativeDue(nextPending.dueDate, nextPending.status).toLowerCase()}.`
-          : "Use the board to sort future work by priority and progress.",
+          : "Use the board to sort future work by priority, category, and progress.",
         statA: `${summary.pendingAssignments.length} open`,
-        statB: `${summary.overdueAssignments.length} overdue`
+        statB: `${summary.completedAssignments} completed`
       },
       examInsight: {
         title: summary.nextExam ? `${summary.nextExam.name} is your nearest exam window.` : "Build an exam roadmap before revision pressure ramps up.",
@@ -531,17 +752,56 @@
     };
   }
 
+  function buildAttendanceModel(summary) {
+    const strongestSubject = summary.attendanceSubjects
+      .slice()
+      .sort((left, right) => right.percentage - left.percentage)[0] || null;
+
+    return {
+      collapsed: state.settings.preferences.collapsedSections.attendance,
+      subjects: summary.attendanceSubjects,
+      summaryCards: [
+        {
+          label: "Average attendance",
+          value: summary.attendanceSubjects.length ? `${summary.attendanceAverage}%` : "0%",
+          hint: summary.attendanceSubjects.length ? "Across all tracked subjects" : "Add a subject to begin tracking"
+        },
+        {
+          label: "At-risk subjects",
+          value: String(summary.atRiskAttendanceCount),
+          hint: `${ATTENDANCE_WARNING_PERCENT}% warning threshold`
+        },
+        {
+          label: "Classes attended",
+          value: String(summary.attendanceSubjects.reduce((sum, subject) => sum + subject.attendedClasses, 0)),
+          hint: "Total attended sessions logged"
+        },
+        {
+          label: "Top subject",
+          value: strongestSubject ? strongestSubject.name : "Not set",
+          hint: strongestSubject ? `${strongestSubject.percentage}% current attendance` : "Track one class to see it here"
+        }
+      ]
+    };
+  }
+
   function buildHabitModel(summary) {
     const keys = getLastDateKeys(14);
+    const recentWeekKeys = getLastDateKeys(7);
     const habits = summary.habits.map((habit) => {
       const streak = state.analytics.streaks.habits[habit.id] || { current: 0, longest: 0 };
       const month = getMonthProgress(habit.history);
+      const completedThisWeek = recentWeekKeys.filter((key) => habit.history[key]).length;
+      const weeklyPercentage = Math.round((completedThisWeek / recentWeekKeys.length) * 100);
 
       return {
         ...habit,
         currentStreak: streak.current,
         longestStreak: streak.longest,
         monthLabel: `${month.percentage}% month`,
+        completedThisWeek,
+        weeklyPercentage,
+        weeklyLabel: `${completedThisWeek}/${recentWeekKeys.length} this week`,
         toggleLabel: habit.history[getTodayKey()] ? "Undo today" : "Mark today",
         historyDays: keys.map((key) => ({ label: key, done: Boolean(habit.history[key]) }))
       };
@@ -570,6 +830,11 @@
           label: "Assignment streak",
           value: `${summary.assignmentStreak}`,
           hint: "Days with completed assignments"
+        },
+        {
+          label: "Study streak",
+          value: `${summary.studyStreak}`,
+          hint: "Days with any productive activity"
         }
       ]
     };
@@ -612,9 +877,9 @@
           hint: "Work sessions completed so far"
         },
         {
-          label: "Overdue count",
-          value: String(summary.overdueAssignments.length),
-          hint: "Assignments needing recovery attention"
+          label: "Active habits",
+          value: String(summary.habits.length),
+          hint: summary.habits.length ? "Small routines you are building" : "Add a habit when you are ready"
         }
       ]
     };
@@ -654,9 +919,11 @@
           hint: "Focused days in a row"
         },
         {
-          label: "Sound alerts",
-          value: state.settings.sounds.enabled ? "On" : "Off",
-          hint: "Audio cues at timer completion"
+          label: "Average session",
+          value: `${state.analytics.focusSessions.totals.completedSessions
+            ? Math.round(state.analytics.focusSessions.totals.totalFocusMinutes / state.analytics.focusSessions.totals.completedSessions)
+            : 0}m`,
+          hint: state.settings.sounds.enabled ? "Sound alerts are enabled" : "Sound alerts are muted"
         }
       ],
       sessions: recentSessions
@@ -664,6 +931,8 @@
   }
 
   function buildSettingsModel() {
+    const backups = storage.listBackups();
+
     return {
       collapsed: state.settings.preferences.collapsedSections.settings,
       theme: state.settings.theme,
@@ -675,7 +944,10 @@
       sidebarCollapsed: state.settings.preferences.sidebarCollapsed,
       version: state.meta.version,
       createdAt: state.meta.createdAt,
-      lastUpdated: state.meta.lastUpdated
+      lastUpdated: state.meta.lastUpdated,
+      backupsCount: backups.length,
+      latestBackupAt: backups[0] ? backups[0].savedAt : "",
+      hasBackups: backups.length > 0
     };
   }
 
@@ -689,6 +961,9 @@
     dom.sidebarContent.innerHTML = templates.renderSidebar(buildSidebarModel(summary));
     dom.overviewPanel.innerHTML = templates.renderOverview(buildOverviewModel(summary));
     dom.plannerPanel.innerHTML = templates.renderPlanner(buildPlannerModel(summary));
+    if (dom.schedulePanel) {
+      dom.schedulePanel.innerHTML = templates.renderSchedule();
+    }
     dom.habitsPanel.innerHTML = templates.renderHabits(buildHabitModel(summary));
     dom.analyticsPanel.innerHTML = templates.renderAnalytics(buildAnalyticsModel(summary));
     dom.focusPanel.innerHTML = templates.renderFocus(buildFocusModel(summary));
@@ -697,105 +972,206 @@
     syncBodyClasses();
     updateTopbarButtons();
     renderModal();
-    refreshChart();
+    refreshCharts(summary);
     updateLiveUi();
   }
 
-  function refreshChart() {
-    const canvas = document.getElementById("analyticsChart");
+  function destroyCharts() {
+    Object.values(runtime.charts).forEach((chart) => {
+      if (chart && typeof chart.destroy === "function") {
+        chart.destroy();
+      }
+    });
+    runtime.charts = {};
+  }
+
+  function prepareChartCanvas(canvas, chartHeight) {
+    const ratio = global.devicePixelRatio || 1;
+    const resolvedHeight = chartHeight || 260;
+    canvas.width = Math.max(360, Math.floor((canvas.clientWidth || 360) * ratio));
+    canvas.height = Math.floor(resolvedHeight * ratio);
+    canvas.style.height = `${resolvedHeight}px`;
+    canvas.style.width = "100%";
+  }
+
+  function buildCommonChartOptions(styles, extraOptions) {
+    return {
+      responsive: false,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: {
+          labels: {
+            color: styles.getPropertyValue("--text-muted").trim()
+          }
+        }
+      },
+      ...extraOptions
+    };
+  }
+
+  function createChart(chartId, config, chartHeight) {
+    const canvas = document.getElementById(chartId);
     if (!canvas || typeof global.Chart === "undefined") {
       return;
     }
 
-    if (runtime.chart) {
-      runtime.chart.destroy();
-      runtime.chart = null;
+    prepareChartCanvas(canvas, chartHeight);
+    runtime.charts[chartId] = new global.Chart(canvas, config);
+    runtime.charts[chartId].resize();
+  }
+
+  function refreshCharts(summary) {
+    if (typeof global.Chart === "undefined") {
+      return;
     }
+
+    destroyCharts();
 
     const styles = global.getComputedStyle(document.body);
     const chartData = state.analytics.weeklyProgress;
-    const ratio = global.devicePixelRatio || 1;
-    const chartHeight = 280;
+    const attendanceSubjects = summary.attendanceSubjects;
+    const assignmentBuckets = {
+      todo: summary.assignments.filter((assignment) => assignment.status === "todo" && !isOverdue(assignment.dueDate, assignment.status)).length,
+      inProgress: summary.assignments.filter((assignment) => assignment.status === "in_progress" && !isOverdue(assignment.dueDate, assignment.status)).length,
+      overdue: summary.overdueAssignments.length,
+      completed: summary.completedAssignments
+    };
+    const habitSeries = summary.habits
+      .map((habit) => ({
+        name: habit.name,
+        consistency: Math.round((getLastDateKeys(7).filter((key) => habit.history[key]).length / 7) * 100)
+      }))
+      .slice(0, 6);
 
-    canvas.width = Math.max(480, Math.floor(canvas.clientWidth * ratio || 480));
-    canvas.height = Math.floor(chartHeight * ratio);
-    canvas.style.height = `${chartHeight}px`;
-    canvas.style.width = "100%";
-
-    runtime.chart = new global.Chart(canvas, {
-      type: "bar",
-      data: {
-        labels: chartData.labels,
-        datasets: [
-          {
-            type: "bar",
-            label: "Assignments done",
-            data: chartData.assignments,
-            borderRadius: 12,
-            backgroundColor: "rgba(82, 225, 178, 0.72)"
-          },
-          {
-            type: "bar",
-            label: "Habit check-ins",
-            data: chartData.habits,
-            borderRadius: 12,
-            backgroundColor: "rgba(110, 199, 255, 0.52)"
-          },
-          {
-            type: "line",
-            label: "Focus minutes",
-            data: chartData.focusMinutes,
-            tension: 0.34,
-            borderWidth: 2,
-            borderColor: styles.getPropertyValue("--warning").trim(),
-            pointBackgroundColor: styles.getPropertyValue("--warning").trim(),
-            yAxisID: "focus"
-          }
-        ]
-      },
-      options: {
-        responsive: false,
-        maintainAspectRatio: false,
-        plugins: {
-          legend: {
-            labels: {
-              color: styles.getPropertyValue("--text-muted").trim()
+    createChart(
+      "studyHoursChart",
+      {
+        type: "line",
+        data: {
+          labels: chartData.labels,
+          datasets: [
+            {
+              label: "Study hours",
+              data: chartData.focusMinutes.map((value) => Number((value / 60).toFixed(1))),
+              tension: 0.35,
+              fill: true,
+              borderWidth: 3,
+              borderColor: styles.getPropertyValue("--accent").trim(),
+              backgroundColor: "rgba(82, 225, 178, 0.16)",
+              pointBackgroundColor: styles.getPropertyValue("--accent-strong").trim()
             }
-          }
+          ]
         },
-        scales: {
-          x: {
-            grid: {
-              color: "rgba(255,255,255,0.05)"
+        options: buildCommonChartOptions(styles, {
+          scales: {
+            x: {
+              grid: { color: "rgba(255,255,255,0.05)" },
+              ticks: { color: styles.getPropertyValue("--text-muted").trim() }
             },
-            ticks: {
-              color: styles.getPropertyValue("--text-muted").trim()
-            }
-          },
-          y: {
-            beginAtZero: true,
-            grid: {
-              color: "rgba(255,255,255,0.05)"
-            },
-            ticks: {
-              color: styles.getPropertyValue("--text-muted").trim()
-            }
-          },
-          focus: {
-            position: "right",
-            beginAtZero: true,
-            grid: {
-              display: false
-            },
-            ticks: {
-              color: styles.getPropertyValue("--text-muted").trim()
+            y: {
+              beginAtZero: true,
+              grid: { color: "rgba(255,255,255,0.05)" },
+              ticks: { color: styles.getPropertyValue("--text-muted").trim() }
             }
           }
-        }
-      }
-    });
+        })
+      },
+      260
+    );
 
-    runtime.chart.resize();
+    createChart(
+      "assignmentCompletionChart",
+      {
+        type: "doughnut",
+        data: {
+          labels: ["To do", "In progress", "Overdue", "Completed"],
+          datasets: [
+            {
+              data: [assignmentBuckets.todo, assignmentBuckets.inProgress, assignmentBuckets.overdue, assignmentBuckets.completed],
+              backgroundColor: [
+                "rgba(110, 199, 255, 0.72)",
+                "rgba(255, 201, 107, 0.72)",
+                "rgba(255, 124, 124, 0.78)",
+                "rgba(99, 240, 181, 0.72)"
+              ],
+              borderWidth: 0
+            }
+          ]
+        },
+        options: buildCommonChartOptions(styles, {
+          cutout: "68%"
+        })
+      },
+      260
+    );
+
+    createChart(
+      "attendanceChart",
+      {
+        type: "bar",
+        data: {
+          labels: attendanceSubjects.length ? attendanceSubjects.map((subject) => subject.code || subject.name) : ["No subjects"],
+          datasets: [
+            {
+              label: "Attendance %",
+              data: attendanceSubjects.length ? attendanceSubjects.map((subject) => subject.percentage) : [0],
+              borderRadius: 14,
+              backgroundColor: attendanceSubjects.length
+                ? attendanceSubjects.map((subject) => subject.warning ? "rgba(255, 124, 124, 0.78)" : "rgba(82, 225, 178, 0.72)")
+                : ["rgba(110, 199, 255, 0.32)"]
+            }
+          ]
+        },
+        options: buildCommonChartOptions(styles, {
+          scales: {
+            x: {
+              grid: { display: false },
+              ticks: { color: styles.getPropertyValue("--text-muted").trim() }
+            },
+            y: {
+              beginAtZero: true,
+              suggestedMax: 100,
+              grid: { color: "rgba(255,255,255,0.05)" },
+              ticks: { color: styles.getPropertyValue("--text-muted").trim() }
+            }
+          }
+        })
+      },
+      260
+    );
+
+    createChart(
+      "habitConsistencyChart",
+      {
+        type: "bar",
+        data: {
+          labels: habitSeries.length ? habitSeries.map((habit) => habit.name) : ["No habits"],
+          datasets: [
+            {
+              label: "Consistency %",
+              data: habitSeries.length ? habitSeries.map((habit) => habit.consistency) : [0],
+              borderRadius: 14,
+              backgroundColor: "rgba(110, 199, 255, 0.62)"
+            }
+          ]
+        },
+        options: buildCommonChartOptions(styles, {
+          scales: {
+            x: {
+              grid: { display: false },
+              ticks: { color: styles.getPropertyValue("--text-muted").trim() }
+            },
+            y: {
+              beginAtZero: true,
+              suggestedMax: 100,
+              grid: { color: "rgba(255,255,255,0.05)" },
+              ticks: { color: styles.getPropertyValue("--text-muted").trim() }
+            }
+          }
+        })
+      },
+      260
+    );
   }
 
   function updateLiveUi() {
@@ -933,6 +1309,7 @@
       if (Object.prototype.hasOwnProperty.call(partial, "search")) preferences.assignmentSearch = partial.search;
       if (Object.prototype.hasOwnProperty.call(partial, "status")) preferences.assignmentStatusFilter = partial.status;
       if (Object.prototype.hasOwnProperty.call(partial, "priority")) preferences.assignmentPriorityFilter = partial.priority;
+      if (Object.prototype.hasOwnProperty.call(partial, "category")) preferences.assignmentCategoryFilter = partial.category;
       if (Object.prototype.hasOwnProperty.call(partial, "subject")) preferences.assignmentSubjectFilter = partial.subject;
       if (Object.prototype.hasOwnProperty.call(partial, "sort")) preferences.assignmentSort = partial.sort;
     });
@@ -968,6 +1345,7 @@
       if (type === "exam") item = findById(state.planner.exams, id);
       if (type === "habit") item = findById(state.planner.habits, id);
       if (type === "weekly") item = findById(state.planner.weeklyTasks, id);
+      if (type === "attendance") item = findById(state.planner.attendance, id);
     }
 
     runtime.modal = { type, mode: id ? "edit" : "create", item };
@@ -995,9 +1373,11 @@
         title: data.title,
         description: data.description,
         subject: data.subject,
+        category: data.category,
         tags: parseCsvList(data.tags),
         status: nextStatus,
         priority: data.priority,
+        progress: Number(data.progress || 0),
         dueDate: data.dueDate,
         createdAt: existing ? existing.createdAt : nowIso(),
         completedAt: nextStatus === "completed" ? (existing && existing.completedAt) || nowIso() : null,
@@ -1092,6 +1472,7 @@
         title: data.title,
         date: String(data.date).slice(0, 10),
         startTime: String(data.startTime || ""),
+        type: String(data.type || "task"),
         notes: data.notes,
         createdAt: existing ? existing.createdAt : nowIso()
       });
@@ -1102,6 +1483,35 @@
     closeModal();
     renderApp();
     showToast(mode === "edit" ? "Monthly task updated." : "Monthly task created.");
+  }
+
+  function upsertAttendance(form, mode, id) {
+    const data = Object.fromEntries(new FormData(form).entries());
+    if (!String(data.name || "").trim()) {
+      showToast("Subject name is required.");
+      return;
+    }
+
+    state = storage.mutateState(state, (draft) => {
+      const existing = id ? findById(draft.planner.attendance, id) : null;
+      const attendance = storage.normalizeAttendanceSubject({
+        ...(existing || {}),
+        id: existing ? existing.id : undefined,
+        name: data.name,
+        code: data.code,
+        attendedClasses: Number(data.attendedClasses || 0),
+        totalClasses: Number(data.totalClasses || 0),
+        targetPercentage: Number(data.targetPercentage || ATTENDANCE_WARNING_PERCENT),
+        notes: data.notes,
+        createdAt: existing ? existing.createdAt : nowIso()
+      });
+
+      setCollectionItem(draft.planner.attendance, attendance);
+    });
+
+    closeModal();
+    renderApp();
+    showToast(mode === "edit" ? "Attendance subject updated." : "Attendance subject created.");
   }
 
   function deleteAssignmentById(id) {
@@ -1164,6 +1574,20 @@
     showToast("Monthly task deleted.");
   }
 
+  function deleteAttendance(id) {
+    const subject = findById(state.planner.attendance, id);
+    if (!subject || !confirmAction(`Delete attendance tracking for "${subject.name}"?`)) {
+      return;
+    }
+
+    state = storage.mutateState(state, (draft) => {
+      removeCollectionItem(draft.planner.attendance, id);
+    });
+    closeModal();
+    renderApp();
+    showToast("Attendance subject deleted.");
+  }
+
   function setAssignmentStatus(id, status) {
     state = storage.mutateState(state, (draft) => {
       const assignment = findById(draft.planner.assignments, id);
@@ -1173,6 +1597,13 @@
 
       assignment.status = status;
       assignment.completedAt = status === "completed" ? assignment.completedAt || nowIso() : null;
+      if (status === "completed") {
+        assignment.progress = 100;
+      } else if (status === "in_progress") {
+        assignment.progress = Math.max(assignment.progress || 0, 35);
+      } else if (status === "todo" && assignment.progress === 100) {
+        assignment.progress = 0;
+      }
     });
 
     renderApp();
@@ -1241,6 +1672,22 @@
     showToast("Monthly task moved.");
   }
 
+  function markAttendance(id, attended) {
+    state = storage.mutateState(state, (draft) => {
+      const subject = findById(draft.planner.attendance, id);
+      if (!subject) {
+        return;
+      }
+
+      subject.totalClasses += 1;
+      if (attended) {
+        subject.attendedClasses += 1;
+      }
+    });
+    renderApp();
+    showToast(attended ? "Attendance marked present." : "Attendance marked absent.");
+  }
+
   function toggleSidebar() {
     updatePreference("sidebarCollapsed", !state.settings.preferences.sidebarCollapsed);
   }
@@ -1254,8 +1701,18 @@
   function setTheme(themeId) {
     state = storage.mutateState(state, (draft) => {
       draft.settings.theme = themeId;
+      if (themeId !== "daylight") {
+        draft.settings.preferences.lastDarkTheme = themeId;
+      }
     });
     renderApp();
+  }
+
+  function toggleAppearanceMode() {
+    const nextTheme = state.settings.theme === "daylight"
+      ? (state.settings.preferences.lastDarkTheme || "midnight")
+      : "daylight";
+    setTheme(nextTheme);
   }
 
   async function toggleNotifications() {
@@ -1322,6 +1779,25 @@
 
   function setPlannerTab(tabKey) {
     updatePreference("activePlannerTab", tabKey);
+  }
+
+  function createBackupSnapshot() {
+    const snapshot = storage.createBackup(state);
+    showToast(snapshot ? "Backup snapshot saved." : "Unable to create a backup.");
+    renderApp();
+  }
+
+  function restoreLatestBackup() {
+    const restored = storage.restoreBackup();
+    if (!restored) {
+      showToast("No backup is available yet.");
+      return;
+    }
+
+    state = restored;
+    closeModal();
+    renderApp();
+    showToast("Latest backup restored.");
   }
 
   function changePlannerMonth(delta) {
@@ -1518,6 +1994,7 @@
 
     try {
       const text = await readFileAsText(file);
+      storage.createBackup(state);
       state = storage.importState(JSON.parse(text));
       closeModal();
       renderApp();
@@ -1529,14 +2006,15 @@
   }
 
   function resetData() {
-    if (!confirmAction("Reset the dashboard back to its demo data?")) {
+    if (!confirmAction("Clear all planner data and start with a blank workspace?")) {
       return;
     }
 
+    storage.createBackup(state);
     state = storage.resetState();
     closeModal();
     renderApp();
-    showToast("Dashboard reset to demo data.");
+    showToast("Planner cleared. Your workspace is ready.");
   }
 
   function handleAction(action, dataset) {
@@ -1545,6 +2023,7 @@
     if (action === "toggle-focus-mode") toggleFocusMode();
     if (action === "toggle-notifications") toggleNotifications();
     if (action === "toggle-sounds") toggleSounds();
+    if (action === "toggle-appearance") toggleAppearanceMode();
     if (action === "set-theme") setTheme(dataset.theme);
     if (action === "toggle-section") toggleSection(dataset.section);
     if (action === "set-planner-tab") setPlannerTab(dataset.tab);
@@ -1556,17 +2035,22 @@
     if (action === "new-exam") openModal("exam");
     if (action === "new-habit") openModal("habit");
     if (action === "new-weekly") openModal("weekly");
+    if (action === "new-attendance") openModal("attendance");
     if (action === "open-assignment-modal") openModal("assignment", dataset.id);
     if (action === "open-exam-modal") openModal("exam", dataset.id);
     if (action === "open-habit-modal") openModal("habit", dataset.id);
     if (action === "open-weekly-modal") openModal("weekly", dataset.id);
+    if (action === "open-attendance-modal") openModal("attendance", dataset.id);
     if (action === "delete-assignment") deleteAssignment(dataset.id);
     if (action === "delete-exam") deleteExam(dataset.id);
     if (action === "delete-habit") deleteHabit(dataset.id);
     if (action === "delete-weekly") deleteWeeklyTask(dataset.id);
+    if (action === "delete-attendance") deleteAttendance(dataset.id);
     if (action === "toggle-assignment-complete") toggleAssignmentComplete(dataset.id);
     if (action === "advance-assignment") advanceAssignment(dataset.id);
     if (action === "toggle-habit-today") toggleHabitToday(dataset.id);
+    if (action === "mark-attendance-present") markAttendance(dataset.id, true);
+    if (action === "mark-attendance-absent") markAttendance(dataset.id, false);
     if (action === "save-profile") saveProfile();
     if (action === "clear-profile") clearProfile();
     if (action === "toggle-pomodoro") togglePomodoro();
@@ -1574,6 +2058,8 @@
     if (action === "skip-pomodoro-mode") skipPomodoroMode();
     if (action === "set-preset") setPomodoroPreset(dataset.preset);
     if (action === "save-now") saveNow();
+    if (action === "create-backup") createBackupSnapshot();
+    if (action === "restore-backup") restoreLatestBackup();
     if (action === "export-data") exportData();
     if (action === "import-data") importData();
     if (action === "reset-data") resetData();
@@ -1620,6 +2106,7 @@
     if (formName === "exam") upsertExam(form, mode, id);
     if (formName === "habit") upsertHabit(form, mode, id);
     if (formName === "weekly") upsertWeeklyTask(form, mode, id);
+    if (formName === "attendance") upsertAttendance(form, mode, id);
   }
 
   function handleFilterInput(event) {
@@ -1632,12 +2119,13 @@
     const selectionEnd = typeof target.selectionEnd === "number" ? target.selectionEnd : null;
 
     if (target.id === "assignmentSearchInput") updateAssignmentFilters({ search: target.value });
+    if (target.id === "assignmentCategoryInput") updateAssignmentFilters({ category: target.value });
     if (target.id === "assignmentSubjectInput") updateAssignmentFilters({ subject: target.value });
     if (target.id === "assignmentStatusSelect") updateAssignmentFilters({ status: target.value });
     if (target.id === "assignmentPrioritySelect") updateAssignmentFilters({ priority: target.value });
     if (target.id === "assignmentSortSelect") updateAssignmentFilters({ sort: target.value });
 
-    if (target.id === "assignmentSearchInput" || target.id === "assignmentSubjectInput") {
+    if (target.id === "assignmentSearchInput" || target.id === "assignmentCategoryInput" || target.id === "assignmentSubjectInput") {
       global.requestAnimationFrame(() => {
         const replacement = document.getElementById(target.id);
         if (!replacement) {
@@ -1761,6 +2249,7 @@
     });
     dom.focusModeBtn.addEventListener("click", toggleFocusMode);
     dom.notificationBtn.addEventListener("click", toggleNotifications);
+    dom.appearanceToggleBtn.addEventListener("click", toggleAppearanceMode);
     dom.themeCycleBtn.addEventListener("click", cycleTheme);
     dom.exportBtn.addEventListener("click", exportData);
     dom.importBtn.addEventListener("click", importData);
@@ -1791,6 +2280,11 @@
   }
 
   function init() {
+    if (runtime.initialized) {
+      renderApp();
+      return;
+    }
+
     cacheDom();
     state = storage.loadState();
     bindEvents();
@@ -1798,6 +2292,7 @@
     renderApp();
     startIntervals();
     sendDueReminders();
+    runtime.initialized = true;
   }
 
   App.app = {

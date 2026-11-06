@@ -1,9 +1,10 @@
-const CACHE_NAME = "student-productivity-dashboard-v2";
+const CACHE_NAME = "student-productivity-dashboard-v3";
 const APP_SHELL = [
   "./",
   "./index.html",
   "./style.css",
   "./script.js",
+  "./auth/auth.js",
   "./utils/constants.js",
   "./utils/helpers.js",
   "./utils/date.js",

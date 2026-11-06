@@ -4,13 +4,15 @@
     APP_NAME,
     APP_VERSION,
     STORAGE_KEY,
+    BACKUP_STORAGE_KEY,
     LEGACY_STORAGE_KEY,
     LEGACY_THEME_KEY,
     LEGACY_NOTIFICATION_KEY,
     PRIORITY_OPTIONS,
     THEMES,
     DEFAULT_COLLAPSED_SECTIONS,
-    POMODORO_PRESETS
+    POMODORO_PRESETS,
+    ATTENDANCE_WARNING_PERCENT
   } = App.constants;
   const { createMap, createUuid, deepClone, nowIso, parseCsvList, safeArray, safeObject } = App.helpers;
   const {
@@ -26,22 +28,59 @@
   } = App.dateUtils;
   const memoryStore = {};
 
-  function readStorage(key) {
-    try {
-      return global.localStorage.getItem(key);
-    } catch (error) {
-      return Object.prototype.hasOwnProperty.call(memoryStore, key) ? memoryStore[key] : null;
+  function getStorageKey(baseKey) {
+    if (baseKey === LEGACY_STORAGE_KEY || baseKey === LEGACY_THEME_KEY || baseKey === LEGACY_NOTIFICATION_KEY) {
+      return baseKey;
     }
+
+    if (App.auth && typeof App.auth.getScopedStorageKey === "function") {
+      return App.auth.getScopedStorageKey(baseKey);
+    }
+
+    return baseKey;
+  }
+
+  function readStorage(key) {
+    const resolvedKey = getStorageKey(key);
+    const candidates = [resolvedKey];
+
+    if (key && key !== resolvedKey && (key === STORAGE_KEY || key === BACKUP_STORAGE_KEY)) {
+      candidates.push(key);
+    }
+
+    for (const candidateKey of candidates) {
+      try {
+        const storedValue = global.localStorage.getItem(candidateKey);
+        if (storedValue !== null) {
+          return storedValue;
+        }
+      } catch (error) {
+        if (Object.prototype.hasOwnProperty.call(memoryStore, candidateKey)) {
+          return memoryStore[candidateKey];
+        }
+      }
+    }
+
+    return Object.prototype.hasOwnProperty.call(memoryStore, resolvedKey) ? memoryStore[resolvedKey] : null;
   }
 
   function writeStorage(key, value) {
-    memoryStore[key] = value;
+    const resolvedKey = getStorageKey(key);
+    const candidates = [resolvedKey];
 
-    try {
-      global.localStorage.setItem(key, value);
-    } catch (error) {
-      console.warn("Persistent storage is unavailable. Using in-memory state for this session.", error);
+    if (key && key !== resolvedKey && (key === STORAGE_KEY || key === BACKUP_STORAGE_KEY)) {
+      candidates.push(key);
     }
+
+    candidates.forEach((candidateKey) => {
+      memoryStore[candidateKey] = value;
+
+      try {
+        global.localStorage.setItem(candidateKey, value);
+      } catch (error) {
+        console.warn("Persistent storage is unavailable. Using in-memory state for this session.", error);
+      }
+    });
   }
 
   function normalizePriority(rawPriority) {
@@ -50,6 +89,25 @@
       .toLowerCase();
 
     return PRIORITY_OPTIONS[key] || PRIORITY_OPTIONS.medium;
+  }
+
+  function normalizeProgress(rawProgress, status) {
+    const parsed = Number(rawProgress);
+    const bounded = Number.isFinite(parsed) ? Math.max(0, Math.min(100, Math.round(parsed))) : null;
+
+    if (status === "completed") {
+      return 100;
+    }
+
+    if (bounded !== null) {
+      return bounded;
+    }
+
+    if (status === "in_progress") {
+      return 55;
+    }
+
+    return 0;
   }
 
   function defaultFocusTimer() {
@@ -77,9 +135,11 @@
       title: String(raw.title || "Untitled assignment").trim(),
       description: String(raw.description || ""),
       subject: String(raw.subject || "General"),
+      category: String(raw.category || raw.type || raw.subject || "General").trim() || "General",
       tags: parseCsvList(raw.tags),
       status,
       priority,
+      progress: normalizeProgress(raw.progress, status),
       dueDate: String(raw.dueDate || raw.due_date || ""),
       createdAt: raw.createdAt || raw.created_at || nowIso(),
       completedAt,
@@ -138,8 +198,26 @@
       date: fallbackDate,
       day: Number.isInteger(raw.day) ? raw.day : Number(raw.day || 0),
       startTime,
+      type: String(raw.type || raw.eventType || "task").trim() || "task",
       notes: String(raw.notes || ""),
       status: String(raw.status || "planned"),
+      createdAt: raw.createdAt || nowIso()
+    };
+  }
+
+  function normalizeAttendanceSubject(rawAttendance) {
+    const raw = safeObject(rawAttendance);
+    const attendedClasses = Math.max(0, Math.round(Number(raw.attendedClasses ?? raw.attended ?? 0) || 0));
+    const totalClasses = Math.max(attendedClasses, Math.round(Number(raw.totalClasses ?? raw.total ?? attendedClasses) || attendedClasses));
+
+    return {
+      id: String(raw.id || createUuid()),
+      name: String(raw.name || raw.subject || "New subject").trim(),
+      code: String(raw.code || "").trim(),
+      attendedClasses,
+      totalClasses,
+      targetPercentage: Math.max(1, Math.min(100, Math.round(Number(raw.targetPercentage || ATTENDANCE_WARNING_PERCENT) || ATTENDANCE_WARNING_PERCENT))),
+      notes: String(raw.notes || ""),
       createdAt: raw.createdAt || nowIso()
     };
   }
@@ -223,7 +301,7 @@
     const profile = safeObject(raw.profile);
 
     return {
-      theme: isValidTheme(theme) ? theme : "midnight",
+      theme: isValidTheme(theme) ? theme : "daylight",
       profile: {
         name: typeof profile.name === "string" ? profile.name : "",
         semester: typeof profile.semester === "string" && profile.semester.trim()
@@ -256,8 +334,10 @@
         assignmentSearch: preferences.assignmentSearch || "",
         assignmentStatusFilter: preferences.assignmentStatusFilter || "all",
         assignmentPriorityFilter: preferences.assignmentPriorityFilter || "all",
+        assignmentCategoryFilter: preferences.assignmentCategoryFilter || "",
         assignmentSubjectFilter: preferences.assignmentSubjectFilter || "",
         assignmentSort: preferences.assignmentSort || "dueSoon",
+        lastDarkTheme: preferences.lastDarkTheme || (theme !== "daylight" ? theme : "midnight"),
         collapsedSections: {
           ...DEFAULT_COLLAPSED_SECTIONS,
           ...safeObject(preferences.collapsedSections)
@@ -281,64 +361,13 @@
 
   function createSeedState() {
     const createdAt = nowIso();
-    const assignments = [
-      {
-        title: "Data structures assignment #3",
-        description: "Implement graph traversals and submit the reflection summary.",
-        subject: "CSE301",
-        tags: ["coding", "graphs"],
-        status: "todo",
-        priority: "high",
-        dueDate: getDateKey(addDays(new Date(), 3)),
-        notes: "Review BFS edge cases before submission."
-      },
-      {
-        title: "Marketing case study report",
-        description: "Prepare the final deck and add competitor research screenshots.",
-        subject: "MBA201",
-        tags: ["presentation", "research"],
-        status: "in_progress",
-        priority: "medium",
-        dueDate: getDateKey(addDays(new Date(), 5)),
-        notes: "Need two more case comparisons."
-      },
-      {
-        title: "Physics lab report",
-        description: "Finalize calculations and attach experiment photos.",
-        subject: "PHY102",
-        tags: ["lab", "report"],
-        status: "todo",
-        priority: "low",
-        dueDate: getDateKey(addDays(new Date(), 8)),
-        notes: ""
-      }
-    ];
-    const exams = [
-      {
-        name: "Algorithms mid-term",
-        subject: "CSE301",
-        date: new Date(Date.now() + 11 * 86400000).toISOString(),
-        reminderDays: [7, 3, 1],
-        notes: "Revise dynamic programming and greedy proofs."
-      },
-      {
-        name: "Marketing finals",
-        subject: "MBA201",
-        date: new Date(Date.now() + 18 * 86400000).toISOString(),
-        reminderDays: [7, 3, 1],
-        notes: "Practice two long-form case answers."
-      }
-    ];
-    const habits = [
-      { name: "Study 2 focused hours", history: { [getTodayKey()]: true } },
-      { name: "Review notes", history: {} },
-      { name: "No phone before class", history: {} }
-    ];
-    const weeklyTasks = [
-      { title: "Revise DSA chapter 5", date: getDateKey(addDays(startOfDay(new Date()), 1)), notes: "Solve 3 extra questions." },
-      { title: "Physics numerics", date: getDateKey(addDays(startOfDay(new Date()), 3)), notes: "" },
-      { title: "Marketing reading", date: getDateKey(addDays(startOfDay(new Date()), 5)), notes: "Chapter 7 summary." }
-    ];
+    const currentUser = App.auth && typeof App.auth.getCurrentUser === "function" ? App.auth.getCurrentUser() : null;
+    // A new planner starts deliberately blank. The student adds only their own work and subjects.
+    const assignments = [];
+    const exams = [];
+    const habits = [];
+    const weeklyTasks = [];
+    const attendance = [];
 
     return {
       meta: {
@@ -347,12 +376,19 @@
         createdAt,
         lastUpdated: createdAt
       },
-      settings: normalizeSettings({}, {}),
+      settings: {
+        ...normalizeSettings({}, {}),
+        profile: {
+          name: currentUser && currentUser.name ? currentUser.name : "",
+          semester: getCurrentSemesterLabel()
+        }
+      },
       planner: {
         assignments: createMap(assignments, normalizeAssignment),
         exams: createMap(exams, normalizeExam),
         habits: createMap(habits, normalizeHabit),
         weeklyTasks: createMap(weeklyTasks, normalizeWeeklyTask),
+        attendance: createMap(attendance, normalizeAttendanceSubject),
         focusTimer: defaultFocusTimer()
       },
       analytics: {
@@ -404,6 +440,7 @@
         exams: createMap(exams, normalizeExam),
         habits: createMap(habits, normalizeHabit),
         weeklyTasks: createMap(weeklyTasks, normalizeWeeklyTask),
+        attendance: createMap([], normalizeAttendanceSubject),
         focusTimer: {
           ...defaultFocusTimer(),
           durationSeconds: safeObject(legacy.pomodoro).timeLeft || defaultFocusTimer().durationSeconds,
@@ -444,6 +481,7 @@
       exams: normalizeCollection(planner.exams, normalizeExam),
       habits: normalizeCollection(planner.habits, normalizeHabit),
       weeklyTasks: normalizeCollection(planner.weeklyTasks, normalizeWeeklyTask),
+      attendance: normalizeCollection(planner.attendance, normalizeAttendanceSubject),
       focusTimer: normalizeFocusTimer(planner.focusTimer)
     };
   }
@@ -586,6 +624,59 @@
     return normalized;
   }
 
+  function getBackupSummary(state) {
+    return {
+      assignments: state.planner.assignments.allIds.length,
+      attendanceSubjects: state.planner.attendance.allIds.length,
+      habits: state.planner.habits.allIds.length,
+      sessions: safeArray(state.analytics.focusSessions && state.analytics.focusSessions.sessions).length
+    };
+  }
+
+  function loadBackups() {
+    try {
+      const raw = readStorage(BACKUP_STORAGE_KEY);
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed : [];
+    } catch (error) {
+      console.warn("Unable to load saved backup snapshots.", error);
+      return [];
+    }
+  }
+
+  function createBackup(currentState) {
+    const normalized = normalizeState(currentState);
+    const backups = loadBackups();
+    const snapshot = {
+      id: createUuid(),
+      savedAt: nowIso(),
+      summary: getBackupSummary(normalized),
+      state: normalized
+    };
+
+    writeStorage(BACKUP_STORAGE_KEY, JSON.stringify([snapshot, ...backups].slice(0, 5)));
+    return snapshot;
+  }
+
+  function listBackups() {
+    return loadBackups().map((backup) => ({
+      id: backup.id,
+      savedAt: backup.savedAt,
+      summary: safeObject(backup.summary)
+    }));
+  }
+
+  function restoreBackup(backupId) {
+    const backups = loadBackups();
+    const snapshot = backupId ? backups.find((backup) => backup.id === backupId) : backups[0];
+
+    if (!snapshot || !snapshot.state) {
+      return null;
+    }
+
+    return saveState(snapshot.state);
+  }
+
   function loadState() {
     try {
       const current = readStorage(STORAGE_KEY);
@@ -623,12 +714,15 @@
   }
 
   App.storage = {
+    createBackup,
     defaultFocusTimer,
     exportState,
+    listBackups,
     importState,
     loadState,
     mutateState,
     normalizeAssignment,
+    normalizeAttendanceSubject,
     normalizeExam,
     normalizeFocusSession,
     normalizeHabit,
@@ -636,6 +730,7 @@
     normalizeWeeklyTask,
     rebuildAnalytics,
     resetState,
+    restoreBackup,
     saveState
   };
 })(window);

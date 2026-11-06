@@ -2,16 +2,19 @@
   const App = (global.StudentDashboard = global.StudentDashboard || {});
 
   App.constants = {
-    APP_NAME: "Student Productivity Dashboard",
-    APP_VERSION: "1.0.0",
+    APP_NAME: "Campus OS",
+    APP_VERSION: "2.0.0",
     STORAGE_KEY: "studentProductivityDashboard.v1",
+    BACKUP_STORAGE_KEY: "studentProductivityDashboard.backups.v1",
     LEGACY_STORAGE_KEY: "studentPlannerProData",
     LEGACY_THEME_KEY: "studentPlannerProTheme",
     LEGACY_NOTIFICATION_KEY: "studentPlannerProNotifications",
-    SECTION_ORDER: ["overview", "planner", "habits", "analytics", "focus", "settings"],
+    ATTENDANCE_WARNING_PERCENT: 75,
+    SECTION_ORDER: ["overview", "planner", "schedule", "habits", "analytics", "focus", "settings"],
     SECTION_LABELS: {
       overview: "Overview",
       planner: "Planner",
+      schedule: "My Schedule",
       habits: "Habits",
       analytics: "Analytics",
       focus: "Focus Lab",
@@ -28,10 +31,11 @@
       { index: 6, short: "Sun", long: "Sunday" }
     ],
     THEMES: [
-      { id: "midnight", label: "Midnight", note: "Deep glass dashboard" },
-      { id: "daylight", label: "Daylight", note: "Bright and airy" },
-      { id: "ember", label: "Ember", note: "Warm study late nights" },
-      { id: "ocean", label: "Ocean", note: "Cool and calm" }
+      { id: "daylight", label: "Paper", note: "Bright, calm, and clear" },
+      { id: "midnight", label: "Midnight", note: "Deep focus after dark" },
+      { id: "ember", label: "Sunset", note: "Warm and quietly energetic" },
+      { id: "ocean", label: "Ocean", note: "Cool, clear concentration" },
+      { id: "lavender", label: "Lavender", note: "Soft and reflective" }
     ],
     ASSIGNMENT_STATUSES: {
       todo: { label: "To do", accent: "status-todo" },
@@ -67,6 +71,7 @@
     ],
     DEFAULT_COLLAPSED_SECTIONS: {
       planner: true,
+      attendance: true,
       habits: true,
       analytics: true,
       focus: true,

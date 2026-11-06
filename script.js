@@ -15,7 +15,14 @@
 
   global.addEventListener("DOMContentLoaded", () => {
     try {
-      if (global.StudentDashboard && global.StudentDashboard.app) {
+      const isAuthenticated =
+        global.StudentDashboard &&
+        global.StudentDashboard.auth &&
+        typeof global.StudentDashboard.auth.init === "function"
+          ? global.StudentDashboard.auth.init()
+          : true;
+
+      if (isAuthenticated && global.StudentDashboard && global.StudentDashboard.app) {
         global.StudentDashboard.app.init();
         registerServiceWorker();
       }
